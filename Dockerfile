@@ -1,0 +1,100 @@
+# syntax=docker/dockerfile:1
+# check=error=true
+
+# This Dockerfile is designed for production, not development. Use with Kamal or build'n'run by hand:
+# docker build -t rails_starter .
+# docker run -d -p 80:80 -e RAILS_MASTER_KEY=<value from config/master.key> --name rails_starter rails_starter
+
+# For a containerized dev environment, see Dev Containers: https://guides.rubyonrails.org/getting_started_with_devcontainer.html
+
+# Pin the Ruby version (must match .ruby-version) and the optional Litestream
+# release. Both ARGs are declared globally so they can drive a FROM stage.
+ARG RUBY_VERSION=4.0.6
+ARG LITESTREAM_VERSION=0.5.16
+
+# Litestream is OPTIONAL and OFF by default: it ships as a single static binary
+# in the final image but is only invoked when the replica env vars are present at
+# run time (see bin/docker-entrypoint). Declared FIRST so the last, default-target
+# stage stays the app's base stage; the binary is pulled in via COPY below.
+FROM litestream/litestream:$LITESTREAM_VERSION AS litestream
+
+FROM docker.io/library/ruby:$RUBY_VERSION-slim AS base
+
+# Rails app lives here
+WORKDIR /rails
+
+# Install base packages
+RUN apt-get update -qq && \
+    apt-get install --no-install-recommends -y curl libjemalloc2 libvips sqlite3 && \
+    ln -s /usr/lib/$(uname -m)-linux-gnu/libjemalloc.so.2 /usr/local/lib/libjemalloc.so && \
+    rm -rf /var/lib/apt/lists /var/cache/apt/archives
+
+# Set production environment variables and enable jemalloc for reduced memory usage and latency.
+ENV RAILS_ENV="production" \
+    BUNDLE_DEPLOYMENT="1" \
+    BUNDLE_PATH="/usr/local/bundle" \
+    BUNDLE_WITHOUT="development" \
+    LD_PRELOAD="/usr/local/lib/libjemalloc.so"
+
+# Throw-away build stage to reduce size of final image
+FROM base AS build
+
+# Install packages needed to build gems
+RUN apt-get update -qq && \
+    apt-get install --no-install-recommends -y build-essential git libvips libyaml-dev pkg-config && \
+    rm -rf /var/lib/apt/lists /var/cache/apt/archives
+
+# Install application gems
+COPY vendor/* ./vendor/
+COPY Gemfile Gemfile.lock ./
+
+RUN bundle install && \
+    rm -rf ~/.bundle/ "${BUNDLE_PATH}"/ruby/*/cache "${BUNDLE_PATH}"/ruby/*/bundler/gems/*/.git && \
+    # -j 1 disable parallel compilation to avoid a QEMU bug: https://github.com/rails/bootsnap/issues/495
+    bundle exec bootsnap precompile -j 1 --gemfile
+
+# Copy application code
+COPY . .
+
+# Precompile bootsnap code for faster boot times.
+# -j 1 disable parallel compilation to avoid a QEMU bug: https://github.com/rails/bootsnap/issues/495
+RUN bundle exec bootsnap precompile -j 1 app/ lib/
+
+# Precompiling assets for production without requiring secret RAILS_MASTER_KEY.
+# The frontend builds via Vite run under the bundle's Bun (bundlebun ships the
+# binary and config/vite.json points viteBinPath at bin/bun-vite), so there is
+# deliberately NO Node/npm/yarn step in this image. asset build happens entirely
+# through the Ruby bundle.
+RUN SECRET_KEY_BASE_DUMMY=1 ./bin/rails assets:precompile
+
+# The Kamal deploy config (config/deploy.yml + .kamal/) is OPTIONAL — it is
+# consumed by bin/kamal only and is never referenced by this Dockerfile, so its
+# presence or absence does not affect the build. Docker users can ignore Kamal
+# entirely and build/run this image by hand.
+
+
+
+
+# Final stage for app image
+FROM base
+
+# Run and own only the runtime files as a non-root user for security
+RUN groupadd --system --gid 1000 rails && \
+    useradd rails --uid 1000 --gid 1000 --create-home --shell /bin/bash
+USER 1000:1000
+
+# Copy built artifacts: gems, application
+COPY --chown=rails:rails --from=build "${BUNDLE_PATH}" "${BUNDLE_PATH}"
+COPY --chown=rails:rails --from=build /rails /rails
+
+# Copy the pinned Litestream binary. It stays inert unless the replica env vars
+# are present at run time (bin/docker-entrypoint), so replication is off by
+# default. litestream/litestream installs /usr/local/bin/litestream.
+COPY --from=litestream /usr/local/bin/litestream /usr/local/bin/litestream
+
+# Entrypoint prepares the database.
+ENTRYPOINT ["/rails/bin/docker-entrypoint"]
+
+# Start server via Thruster by default, this can be overwritten at runtime
+EXPOSE 80
+CMD ["./bin/thrust", "./bin/rails", "server"]

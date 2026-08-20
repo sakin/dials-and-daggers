@@ -1,0 +1,13 @@
+# frozen_string_literal: true
+
+class <%= class_name %>::Component < ApplicationViewComponent
+  with_collection_parameter :<%= singular_name %>
+<% if attributes.any? -%>
+<% attributes.each do |attr| -%>
+  option :<%= attr.name %>
+<% end -%>
+<% else -%>
+  # Declare this component's arguments with Dry::Initializer, for example:
+  #   option :title
+<% end -%>
+end

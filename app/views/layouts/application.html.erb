@@ -1,0 +1,11 @@
+<%# The default layout is a ViewComponent (Layout::Component) rendering the
+    full HTML document: shared nav, flash region, and the authored page as the
+    main content. The component owns the <head> tags (meta, Vite, CSRF) so every
+    page renders through the same primitives. %>
+<%= render Layout::Component.new(
+      title: content_for(:title) || "Rails Starter",
+      head: content_for(:head),
+      application_name: "Rails Starter"
+    ) do %>
+  <%= yield %>
+<% end %>
