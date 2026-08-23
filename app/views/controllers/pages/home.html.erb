@@ -16,10 +16,24 @@
     <span>The frontend is running on Vite with Tailwind &amp; daisyUI.</span>
   </div>
 
-  <h1 class="mt-8 text-3xl font-bold">Rails Starter</h1>
+  <h1 class="mt-8 text-3xl font-bold">Dials and Daggers</h1>
   <p class="mt-2">A themed daisyUI button:</p>
   <button type="button" class="btn btn-primary mt-4">Primary button</button>
 
   <hr class="my-8">
 
-  <%= component "banner", title: "Rails Starter" %>
+  <button
+    type="button"
+    class="btn"
+    data-controller="modal-open"
+    data-modal-open-id-value="demo-modal"
+    data-action="click->modal-open#open"
+  >Open</button>
+
+  <%= component "modal", id: "demo-modal", title: "Demo modal" do %>
+    <p class="py-4">Opened with <code>dialog.showModal()</code> via the external <code>modal-open</code> Stimulus controller; the modal itself only owns dismissal.</p>
+  <% end %>
+
+  <hr class="mt-8">
+
+  <%= component "banner", title: "Dials and Daggers" %>
