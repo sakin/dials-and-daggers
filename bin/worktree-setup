@@ -1,0 +1,95 @@
+#!/usr/bin/env ruby
+require "fileutils"
+require "pathname"
+
+APP_ROOT = File.expand_path("..", __dir__)
+
+def system!(*args)
+  system(*args, exception: true)
+end
+
+# The primary checkout is the worktree whose <path>/.git is a directory;
+# linked worktrees have a `.git` *file* pointing at .git/worktrees/<name>.
+def worktree_list
+  `git worktree list --porcelain`.scan(/^worktree (.+)$/).flatten
+end
+
+def primary_checkout(paths)
+  paths.find { |p| File.directory?(File.join(p, ".git")) }
+end
+
+FileUtils.chdir APP_ROOT do
+  paths = worktree_list
+  raise "git worktree list returned no entries" if paths.empty?
+
+  primary = primary_checkout(paths)
+  primary ||= paths.first
+
+  in_primary = File.realpath(primary) == File.realpath(APP_ROOT)
+
+  # Step 1: symlink config/master.key from the primary, unless we ARE primary.
+  unless in_primary
+    worktree_key = File.join(APP_ROOT, "config", "master.key")
+    primary_key  = File.join(primary, "config", "master.key")
+    unless File.exist?(worktree_key)
+      unless File.exist?(primary_key)
+        abort "#{'=' * 70}\nNo master.key found in primary checkout #{primary}; " \
+              "run `bin/rails credentials:edit` there first.\n#{'=' * 70}"
+      end
+      puts "== Linking config/master.key from primary checkout =="
+      FileUtils.symlink primary_key, worktree_key
+    end
+  end
+
+  # Step 2: snapshot the primary's development DB via VACUUM INTO (WAL-safe),
+  # then delegate the rest to bin/setup.
+  primary_db = File.join(primary, "storage", "development.sqlite3")
+  worktree_db = File.join(APP_ROOT, "storage", "development.sqlite3")
+  if File.exist?(primary_db)
+    unless File.exist?(worktree_db)
+      FileUtils.mkdir_p(File.join(APP_ROOT, "storage"))
+      puts "== Copying development database from primary checkout =="
+      require "sqlite3"
+      target = worktree_db.gsub("'") { "''" }
+      SQLite3::Database.new(primary_db) do |db|
+        db.execute("VACUUM INTO '#{target}'")
+      end
+    end
+  end
+
+  # Step 3: allocate a collision-free port slot and write the worktree .env.
+  # Index n = position of this worktree in `git worktree list` (primary is 0).
+  n = paths.index { |p| File.realpath(p) == File.realpath(APP_ROOT) }
+  n ||= 0
+  port = 3000 + n
+  vite_port = 3036 + n
+
+  env_path = File.join(APP_ROOT, ".env")
+  # Foreman (engine.rb: base_port = env["PORT"] || ENV["PORT"]) reads the .env
+  # value before the shell's ENV and spawns children with the .env hash, which
+  # overrides inherited variables. So a shell-set PORT/VITE_RUBY_PORT can only
+  # win if the key is absent from .env. Omit any key the shell already exports.
+  computed = { "PORT" => port.to_s, "VITE_RUBY_PORT" => vite_port.to_s }
+  # Shell-set keys win over .env (see note above): omit them so Foreman falls
+  # through to the parent ENV. PORT and VITE_RUBY_PORT are regenerated every
+  # run; only unrelated lines the user adds are carried over.
+  new_env = computed.reject { |k, _| ENV.key?(k) }
+  existing = {}
+  if File.exist?(env_path)
+    File.foreach(env_path) do |line|
+      key, value = line.chomp.split("=", 2)
+      existing[key] = value if key && !key.empty? && !computed.key?(key)
+    end
+  end
+  merged = existing.merge(new_env)
+  if merged != existing
+    puts "== Writing .env (#{merged.map { |k, v| "#{k}=#{v}" }.join(", ")}) =="
+    File.write(env_path, merged.map { |k, v| "#{k}=#{v}" }.join("\n") + "\n")
+  end
+
+  # Step 4: delegate to bin/setup with the appropriate flags.
+  setup_args = []
+  setup_args << "--skip-server" unless ARGV.include?("--dev")
+  setup_args << "--reset" if ARGV.include?("--reset")
+  exec "bin/setup", *setup_args
+end
